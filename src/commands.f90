@@ -44,13 +44,17 @@ module commands
     integer, parameter  :: CMD_MEAN     = 4
     integer, parameter  :: CMD_VAR      = 5
     integer, parameter  :: CMD_MAX      = 6
+    integer, parameter  :: CMD_SERIES   = 7
+    integer, parameter  :: CMD_DIFF     = 8
     character(len=*), dimension(*), parameter   :: COMMAND = [ &
         "mse_series     ", &
         "max_diff_series", &
         "correlation_map", &
         "mean_map       ", &
         "var_map        ", &
-        "max_map        " &
+        "max_map        ", &
+        "all_series     ", &
+        "difference     " &
     ]
     logical, dimension(*), parameter            :: DUAL = [ &
         .true., &
@@ -58,7 +62,9 @@ module commands
         .true., &
         .false., &
         .false., &
-        .false. &
+        .false., &
+        .true., &
+        .true. &
     ]
 
 contains
@@ -190,6 +196,12 @@ contains
         case(CMD_MAX)
             iErrCode = GetMax(sFileName, tRef, raRefConc)
             if(iErrCode /= 0) iRetCode = iErrCode + 60
+        case(CMD_SERIES)
+            iErrCode = GetSeries(sFileName, ivDateTime, tRef, raRefConc, tCmp, raCmpConc)
+            if(iErrCode /= 0) iRetCode = iErrCode + 60
+        case(CMD_DIFF)
+            iErrCode = GetDifference(sFileName, ivDateTime, tRef, raRefConc, tCmp, raCmpConc)
+            if(iErrCode /= 0) iRetCode = iErrCode + 60
         case default
             ! Unknown command (should never happen after the inputs check)
             iRetCode = 70
@@ -202,6 +214,162 @@ contains
     ! *********************
     
     ! Tier 1: Assemble results
+    
+    function GetDifference(sFileName, ivDateTime, tRef, raRefConc, tCmp, raCmpConc) result(iRetCode)
+    
+        ! Routine arguments
+        character(len=*), intent(in)            :: sFileName
+        integer, dimension(:), intent(in)       :: ivDateTime
+        type(CalpuffType), intent(in)           :: tRef
+        real, dimension(:,:,:), intent(in)      :: raRefConc
+        type(CalpuffType), intent(in)           :: tCmp
+        real, dimension(:,:,:), intent(in)      :: raCmpConc
+        integer                                 :: iRetCode
+    
+        ! Locals
+        real, dimension(:), allocatable         :: rvResult
+        integer                                 :: iErrCode
+        integer                                 :: iLUN
+        integer                                 :: i
+        integer                                 :: iYear
+        integer                                 :: iMonth
+        integer                                 :: iDay
+        integer                                 :: iHour
+        integer                                 :: iMinute
+        integer                                 :: iSecond
+    
+        ! Assume success (will falsify on failure)
+        iRetCode = 0
+    
+        ! Compute result
+        iErrCode = ComputeDifference(raRefConc, raCmpConc, rvResult)
+        if(iErrCode /= 0) then
+            iRetCode = 10 + iErrCode
+            return
+        end if
+    
+        ! Write result
+        open(newunit=iLUN, file=sFileName, status='unknown', action='write', iostat=iErrCode)
+        if(iErrCode /= 0) then
+            iRetCode = 30 + iErrCode
+            return
+        end if
+        write(iLUN, "('Date.Time, Difference')")
+        do i = 1, size(ivDateTime)
+            call UnpackTime(ivDateTime(i), iYear, iMonth, iDay, iHour, iMinute, iSecond)
+            write(iLUN, "(i4.4,2('-',i2.2),1x,i2.2,2(':',i2.2),',',e15.7)") &
+                iYear, iMonth, iDay, iHour, iMinute, iSecond, &
+                rvResult(i)
+        end do
+        close(iLUN)
+        
+    end function GetDifference
+    
+    
+    function GetSeries(sFileName, ivDateTime, tRef, raRefConc, tCmp, raCmpConc) result(iRetCode)
+    
+        ! Routine arguments
+        character(len=*), intent(in)            :: sFileName
+        integer, dimension(:), intent(in)       :: ivDateTime
+        type(CalpuffType), intent(in)           :: tRef
+        real, dimension(:,:,:), intent(in)      :: raRefConc
+        type(CalpuffType), intent(in)           :: tCmp
+        real, dimension(:,:,:), intent(in)      :: raCmpConc
+        integer                                 :: iRetCode
+    
+        ! Locals
+        real, dimension(:), allocatable         :: rvMSE
+        real, dimension(:), allocatable         :: rvMaxDiff
+        real, dimension(:), allocatable         :: rvTimeMeanRef
+        real, dimension(:), allocatable         :: rvTimeMeanCmp
+        real, dimension(:), allocatable         :: rvTimeMaxRef
+        real, dimension(:), allocatable         :: rvTimeMaxCmp
+        integer, dimension(:,:), allocatable    :: imTimeZeros
+        integer, dimension(:,:), allocatable    :: imTimeNonZeros
+        integer                                 :: iErrCode
+        integer                                 :: iLUN
+        integer                                 :: i
+        integer                                 :: iYear
+        integer                                 :: iMonth
+        integer                                 :: iDay
+        integer                                 :: iHour
+        integer                                 :: iMinute
+        integer                                 :: iSecond
+		real									:: rConcordance
+    
+        ! Assume success (will falsify on failure)
+        iRetCode = 0
+    
+        ! Compute result
+        iErrCode = ComputeMSE(raRefConc, raCmpConc, rvMSE)
+        if(iErrCode /= 0) then
+            iRetCode = 10 + iErrCode
+            return
+        end if
+        iErrCode = ComputeMaxDiff(raRefConc, raCmpConc, rvMaxDiff)
+        if(iErrCode /= 0) then
+            iRetCode = 20 + iErrCode
+            return
+        end if
+        iErrCode = ComputeTimeMean(raRefConc, rvTimeMeanRef)
+        if(iErrCode /= 0) then
+            iRetCode = 40 + iErrCode
+            return
+        end if
+        iErrCode = ComputeTimeMean(raCmpConc, rvTimeMeanCmp)
+        if(iErrCode /= 0) then
+            iRetCode = 50 + iErrCode
+            return
+        end if
+        iErrCode = ComputeTimeMax(raRefConc, rvTimeMaxRef)
+        if(iErrCode /= 0) then
+            iRetCode = 60 + iErrCode
+            return
+        end if
+        iErrCode = ComputeTimeMax(raCmpConc, rvTimeMaxCmp)
+        if(iErrCode /= 0) then
+            iRetCode = 70 + iErrCode
+            return
+        end if
+        iErrCode = ComputeTimeZeros(raRefConc, raCmpConc, imTimeZeros)
+        if(iErrCode /= 0) then
+            iRetCode = 80 + iErrCode
+            return
+        end if
+        iErrCode = ComputeTimeNonZeros(raRefConc, raCmpConc, imTimeNonZeros)
+        if(iErrCode /= 0) then
+            iRetCode = 85 + iErrCode
+            return
+        end if
+    
+        ! Write result
+        open(newunit=iLUN, file=sFileName, status='unknown', action='write', iostat=iErrCode)
+        if(iErrCode /= 0) then
+            iRetCode = 90 + iErrCode
+            return
+        end if
+        write(iLUN, "('Date.Time, " // &
+            "MSE, Max.Diff, Mean.Ref, Mean.Cmp, Max.Ref, Max.Cmp, " // &
+            "Zeros.Ref, Zeros.Cmp, Zeros.RefCmp, Zeros.Both, Zeros.Any, " // &
+			"Non.Zeros.Ref, Non.Zeros.Cmp, Non.Zeros.Both, Non.Zeros.Any, " // &
+			"Concordance')")
+        do i = 1, size(ivDateTime)
+            call UnpackTime(ivDateTime(i), iYear, iMonth, iDay, iHour, iMinute, iSecond)
+			if(imTimeNonZeros(i,4) > 0) then
+				rConcordance = real(imTimeNonZeros(i,3),kind=4)/real(imTimeNonZeros(i,4),kind=4)
+			else
+				rConcordance = 0.0
+			end if
+            write(iLUN, "(i4.4,2('-',i2.2),1x,i2.2,2(':',i2.2),6(',',e15.7),9(',',i5),',',f9.7)") &
+                iYear, iMonth, iDay, iHour, iMinute, iSecond, &
+                rvMSE(i), rvMaxDiff(i), rvTimeMeanRef(i), rvTimeMeanCmp(i), &
+                rvTimeMaxRef(i), rvTimeMaxCmp(i), imTimeZeros(i,1:5), imTimeNonZeros(i,1:4), &
+				rConcordance
+        end do
+        close(iLUN)
+        
+    end function GetSeries
+    
     
     function GetMSE(sFileName, ivDateTime, tRef, raRefConc, tCmp, raCmpConc) result(iRetCode)
     
@@ -656,6 +824,143 @@ contains
     end function ComputeMax
     
     
+    function ComputeTimeMean(raConc1, rvResult) result(iRetCode)
+    
+        ! Routine arguments
+        real, dimension(:,:,:), intent(in)              :: raConc1
+        real, dimension(:), allocatable, intent(out)    :: rvResult
+        integer                                         :: iRetCode
+    
+        ! Locals
+        integer :: iNx
+        integer :: iNy
+        integer :: iSeriesLength
+        integer :: i
+    
+        ! Assume success (will falsify on failure)
+        iRetCode = 0
+    
+        ! Reserve workspace
+        iSeriesLength = size(raConc1, dim=1)
+        iNx = size(raConc1, dim=2)
+        iNy = size(raConc1, dim=3)
+        if(allocated(rvResult)) deallocate(rvResult)
+        allocate(rvResult(iSeriesLength))
+        rvResult = 0.
+    
+        ! Get the information desired
+        do i = 1, iSeriesLength
+            rvResult(i) = sum(raConc1(i,:,:)) / (iNx*iNy)
+        end do
+    
+    end function ComputeTimeMean
+    
+    
+    function ComputeTimeMax(raConc1, rvResult) result(iRetCode)
+    
+        ! Routine arguments
+        real, dimension(:,:,:), intent(in)              :: raConc1
+        real, dimension(:), allocatable, intent(out)    :: rvResult
+        integer                                         :: iRetCode
+    
+        ! Locals
+        integer :: iNx
+        integer :: iNy
+        integer :: iSeriesLength
+        integer :: i
+    
+        ! Assume success (will falsify on failure)
+        iRetCode = 0
+    
+        ! Reserve workspace
+        iSeriesLength = size(raConc1, dim=1)
+        iNx = size(raConc1, dim=2)
+        iNy = size(raConc1, dim=3)
+        if(allocated(rvResult)) deallocate(rvResult)
+        allocate(rvResult(iSeriesLength))
+        rvResult = 0.
+    
+        ! Get the information desired
+        do i = 1, iSeriesLength
+            rvResult(i) = maxval(raConc1(i,:,:))
+        end do
+    
+    end function ComputeTimeMax
+    
+    
+    function ComputeTimeZeros(raConc1, raConc2, imResult) result(iRetCode)
+    
+        ! Routine arguments
+        real, dimension(:,:,:), intent(in)              	:: raConc1
+        real, dimension(:,:,:), intent(in)              	:: raConc2
+        integer, dimension(:,:), allocatable, intent(out)  	:: imResult
+        integer                                         	:: iRetCode
+    
+        ! Locals
+        integer :: iNx
+        integer :: iNy
+        integer :: iSeriesLength
+        integer :: i
+    
+        ! Assume success (will falsify on failure)
+        iRetCode = 0
+    
+        ! Reserve workspace
+        iSeriesLength = size(raConc1, dim=1)
+        iNx = size(raConc1, dim=2)
+        iNy = size(raConc1, dim=3)
+        if(allocated(imResult)) deallocate(imResult)
+        allocate(imResult(iSeriesLength, 5))
+        imResult = 0
+    
+        ! Get the information desired
+        do i = 1, iSeriesLength
+            imResult(i,1) = count(raConc1(i,:,:) <= 0.)
+            imResult(i,2) = count(raConc2(i,:,:) <= 0.)
+            imResult(i,3) = count(raConc1(i,:,:)*raConc2(i,:,:) <= 0.)
+            imResult(i,4) = count(raConc1(i,:,:) <= 0. .and. raConc2(i,:,:) <= 0.)
+            imResult(i,5) = count(raConc1(i,:,:) <= 0. .or. raConc2(i,:,:) <= 0.)
+        end do
+    
+    end function ComputeTimeZeros
+    
+    
+    function ComputeTimeNonZeros(raConc1, raConc2, imResult) result(iRetCode)
+    
+        ! Routine arguments
+        real, dimension(:,:,:), intent(in)              	:: raConc1
+        real, dimension(:,:,:), intent(in)              	:: raConc2
+        integer, dimension(:,:), allocatable, intent(out)  	:: imResult
+        integer                                         	:: iRetCode
+    
+        ! Locals
+        integer :: iNx
+        integer :: iNy
+        integer :: iSeriesLength
+        integer :: i
+    
+        ! Assume success (will falsify on failure)
+        iRetCode = 0
+    
+        ! Reserve workspace
+        iSeriesLength = size(raConc1, dim=1)
+        iNx = size(raConc1, dim=2)
+        iNy = size(raConc1, dim=3)
+        if(allocated(imResult)) deallocate(imResult)
+        allocate(imResult(iSeriesLength, 4))
+        imResult = 0
+    
+        ! Get the information desired
+        do i = 1, iSeriesLength
+            imResult(i,1) = count(raConc1(i,:,:) > 0.)
+            imResult(i,2) = count(raConc2(i,:,:) > 0.)
+            imResult(i,3) = count(raConc1(i,:,:) > 0. .and. raConc2(i,:,:) > 0.)
+            imResult(i,4) = count(raConc1(i,:,:) > 0. .or. raConc2(i,:,:) > 0.)
+        end do
+    
+    end function ComputeTimeNonZeros
+    
+    
     function ComputeMSE(raConc1, raConc2, rvResult) result(iRetCode)
     
         ! Routine arguments
@@ -687,6 +992,35 @@ contains
         end do
     
     end function ComputeMSE
+    
+    
+    function ComputeDifference(raConc1, raConc2, rvResult) result(iRetCode)
+    
+        ! Routine arguments
+        real, dimension(:,:,:), intent(in)              :: raConc1
+        real, dimension(:,:,:), intent(in)              :: raConc2
+        real, dimension(:), allocatable, intent(out)    :: rvResult
+        integer                                         :: iRetCode
+    
+        ! Locals
+        integer :: iSeriesLength
+        integer :: i
+    
+        ! Assume success (will falsify on failure)
+        iRetCode = 0
+    
+        ! Reserve workspace
+        iSeriesLength = size(raConc1, dim=1)
+        if(allocated(rvResult)) deallocate(rvResult)
+        allocate(rvResult(iSeriesLength))
+        rvResult = 0.
+    
+        ! Get the information desired
+        do i = 1, iSeriesLength
+            rvResult(i) = sum(raConc1(i,:,:) - raConc2(i,:,:))
+        end do
+    
+    end function ComputeDifference
     
     
     function ComputeMaxDiff(raConc1, raConc2, rvResult) result(iRetCode)
